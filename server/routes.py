@@ -60,6 +60,7 @@ USEFUL PATTERN — how to save a new row:
   db.refresh(new_user)   ← fills in the auto-generated id and created_at
 """
 
+import json
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -178,7 +179,7 @@ async def stream(
             while True:
                 message = await q.get()
                 if message["sender"] == username or message["recipient"] == username:
-                    yield {"data": str(message)}
+                    yield {"data": json.dumps(message)}
         finally:
             broadcaster.unsubscribe(q)
 

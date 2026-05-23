@@ -66,7 +66,7 @@ def listen_for_messages(token: str) -> None:
                 if line.startswith("data:"):
                     raw = line[len("data:"):].strip()
                     try:
-                        msg = json.loads(raw.replace("'", '"'))
+                        msg = json.loads(raw)
                         print(f"\n  [{msg['sender']} → {msg['recipient']}]: {msg['content']}")
                         print("  > ", end="", flush=True)
                     except Exception:
