@@ -64,6 +64,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
+from sse_starlette.sse import EventSourceResponse
 
 from .models import User, Message, get_db
 from .schemas import (
@@ -72,6 +73,7 @@ from .schemas import (
 )
 from .auth import hash_password, verify_password, create_token, require_auth
 from .crypto import encrypt, decrypt
+from .broadcaster import broadcaster
 
 
 log = logging.getLogger(__name__)
@@ -134,15 +136,12 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
 # TODO 3 — Send a message (authenticated)
 # ---------------------------------------------------------------------------
 @router.post("/messages", response_model=MessageResponse, status_code=status.HTTP_201_CREATED)
-def send_message(
+async def send_message(
     body: SendMessageRequest,
     db: Session = Depends(get_db),
     username: str = Depends(require_auth),
 ):
-    # Encrypt the message content
     ciphertext = encrypt(body.content)
-    
-    # Create and save the message
     new_message = Message(
         sender=username,
         recipient=body.recipient,
@@ -151,17 +150,39 @@ def send_message(
     db.add(new_message)
     db.commit()
     db.refresh(new_message)
-    
-    log.info(f"Message sent from {username} to {body.recipient}")
-    
-    # Return the message with decrypted content
-    return MessageResponse(
+
+    response = MessageResponse(
         id=new_message.id,
         sender=username,
         recipient=body.recipient,
-        content=body.content,  # Return the original plain text
+        content=body.content,
         created_at=new_message.created_at
     )
+    await broadcaster.publish(response.model_dump(mode="json"))
+    log.info(f"Message sent from {username} to {body.recipient}")
+    return response
+
+
+# ---------------------------------------------------------------------------
+# Stream — SSE real-time endpoint
+# ---------------------------------------------------------------------------
+@router.get("/stream")
+async def stream(
+    db: Session = Depends(get_db),
+    username: str = Depends(require_auth),
+) -> EventSourceResponse:
+    q = broadcaster.subscribe()
+
+    async def event_generator():
+        try:
+            while True:
+                message = await q.get()
+                if message["sender"] == username or message["recipient"] == username:
+                    yield {"data": str(message)}
+        finally:
+            broadcaster.unsubscribe(q)
+
+    return EventSourceResponse(event_generator())
 
 
 # ---------------------------------------------------------------------------

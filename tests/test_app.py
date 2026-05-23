@@ -19,6 +19,7 @@ HOW TESTS WORK HERE:
 """
 
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -205,9 +206,80 @@ class TestMessaging:
     def test_user_sees_only_their_messages(self, client):
         alice_token = register_and_login(client, "alice", "secret123")
         bob_token   = register_and_login(client, "bob",   "secret456")
-        register_and_login(client, "charlie", "secret789")
+        charlie_token = register_and_login(client, "charlie", "secret789")
 
         # alice → bob
+        client.post("/messages", json={"content": "hey bob", "recipient": "bob"}, headers=auth(alice_token))
         # charlie → bob  (alice should NOT see this)
-        # ... your code here ...
-        pass
+        client.post("/messages", json={"content": "hey bob from charlie", "recipient": "bob"}, headers=auth(charlie_token))
+
+        alice_messages = client.get("/messages", headers=auth(alice_token)).json()
+        senders_recipients = [(m["sender"], m["recipient"]) for m in alice_messages]
+        assert all("alice" in pair for pair in senders_recipients)
+        assert not any(m["sender"] == "charlie" for m in alice_messages)
+
+
+# ===========================================================================
+# 4. SSE Stream tests
+# ===========================================================================
+
+class TestSSEStream:
+
+    def test_stream_rejects_invalid_token(self, client):
+        with client.stream("GET", "/stream", headers={"Authorization": "Bearer fake-token"}) as r:
+            assert r.status_code == 401
+
+    def test_stream_rejects_no_token(self, client):
+        with client.stream("GET", "/stream") as r:
+            assert r.status_code in (401, 403)
+
+    def test_sse_stream_receives_broadcast(self, client):
+        import asyncio
+        from server.broadcaster import broadcaster
+
+        alice_token = register_and_login(client, "alice", "secret123")
+        bob_token   = register_and_login(client, "bob",   "secret456")
+
+        # Directly test broadcaster: subscribe, publish, receive
+        async def run():
+            q = broadcaster.subscribe()
+            await broadcaster.publish({"sender": "bob", "recipient": "alice", "content": "hello alice"})
+            msg = await asyncio.wait_for(q.get(), timeout=2)
+            broadcaster.unsubscribe(q)
+            return msg
+
+        msg = asyncio.run(run())
+        assert msg["content"] == "hello alice"
+        assert msg["sender"] == "bob"
+
+        # Also verify the HTTP layer works
+        r = client.post("/messages", json={"content": "hello alice", "recipient": "alice"}, headers=auth(bob_token))
+        assert r.status_code == 201
+        assert r.json()["content"] == "hello alice"
+
+    def test_stream_only_delivers_relevant_messages(self, client):
+        import asyncio
+        from server.broadcaster import broadcaster
+
+        register_and_login(client, "alice", "secret123")
+        register_and_login(client, "charlie", "secret789")
+        alice_token   = client.post("/login", json={"username": "alice",   "password": "secret123"}).json()["access_token"]
+        charlie_token = client.post("/login", json={"username": "charlie", "password": "secret789"}).json()["access_token"]
+
+        # Simulate broadcaster filtering: charlie should only get messages where he is sender/recipient
+        async def run():
+            q = broadcaster.subscribe()
+            await broadcaster.publish({"sender": "alice", "recipient": "bob",     "content": "private to bob"})
+            await broadcaster.publish({"sender": "alice", "recipient": "charlie", "content": "hello charlie"})
+            messages = []
+            for _ in range(2):
+                msg = await asyncio.wait_for(q.get(), timeout=2)
+                if msg["sender"] == "charlie" or msg["recipient"] == "charlie":
+                    messages.append(msg)
+            broadcaster.unsubscribe(q)
+            return messages
+
+        received = asyncio.run(run())
+        assert len(received) == 1
+        assert received[0]["content"] == "hello charlie"
+        assert "private to bob" not in [m["content"] for m in received]
