@@ -60,6 +60,7 @@ USEFUL PATTERN — how to save a new row:
   db.refresh(new_user)   ← fills in the auto-generated id and created_at
 """
 
+import asyncio
 import json
 import logging
 
@@ -72,7 +73,7 @@ from .schemas import (
     RegisterRequest, LoginRequest, TokenResponse,
     SendMessageRequest, MessageResponse,
 )
-from .auth import hash_password, verify_password, create_token, require_auth
+from .auth import hash_password, verify_password, create_token, require_auth, require_auth_flexible
 from .crypto import encrypt, decrypt
 from .broadcaster import broadcaster
 
@@ -115,6 +116,8 @@ def login(body: LoginRequest, db: Session = Depends(get_db)):
     # Find the user in the database
     user = db.query(User).filter(User.username == body.username).first()
     if not user:
+        # Hash anyway to prevent timing-based username enumeration
+        hash_password(body.password)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid credentials"
@@ -170,7 +173,7 @@ async def send_message(
 @router.get("/stream")
 async def stream(
     db: Session = Depends(get_db),
-    username: str = Depends(require_auth),
+    username: str = Depends(require_auth_flexible),
 ) -> EventSourceResponse:
     q = broadcaster.subscribe()
 
@@ -179,7 +182,9 @@ async def stream(
             while True:
                 message = await q.get()
                 if message["sender"] == username or message["recipient"] == username:
-                    yield {"data": json.dumps(message)}
+                    yield {"event": "message", "data": json.dumps(message)}
+        except asyncio.CancelledError:
+            raise
         finally:
             broadcaster.unsubscribe(q)
 

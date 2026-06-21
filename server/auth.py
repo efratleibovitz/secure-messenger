@@ -74,11 +74,12 @@ from typing import Optional
 
 import bcrypt
 from jose import JWTError, jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Query, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 
-SECRET_KEY = "change-this-to-a-long-random-string-in-production"
+import os
+SECRET_KEY = os.environ["JWT_SECRET"]
 ALGORITHM = "HS256"
 TOKEN_EXPIRE_HOURS = 24
 
@@ -143,6 +144,19 @@ def decode_token(token: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 # TODO 5 — FastAPI dependency: enforce authentication on a route
 # ---------------------------------------------------------------------------
+def require_auth_flexible(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(HTTPBearer(auto_error=False)),
+    token: Optional[str] = Query(default=None),
+) -> str:
+    raw = credentials.credentials if credentials else token
+    if not raw:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authenticated")
+    username = decode_token(raw)
+    if username is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or expired token")
+    return username
+
+
 def require_auth(credentials: HTTPAuthorizationCredentials = Depends(_bearer)) -> str:
     """
     Extract the Bearer token from the Authorization header,
